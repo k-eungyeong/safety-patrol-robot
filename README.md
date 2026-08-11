@@ -84,7 +84,7 @@ ros2 service call /delete_entity gazebo_msgs/srv/DeleteEntity "{name: 'burger'}"
 
 ## 4. 진행 상황
 
-### 완료 (Day 1~5)
+### 완료 (Day 1~6)
 - ROS2 Humble + Gazebo + TurtleBot3 환경 구축, teleop 조작 확인
 - SLAM(Cartographer)으로 맵 생성 및 저장 (`maps/my_map.yaml`, `.pgm`)
 - Nav2 + 저장된 맵으로 2D Pose Estimate → 2D Nav Goal 자율 이동 확인
@@ -93,18 +93,19 @@ ros2 service call /delete_entity gazebo_msgs/srv/DeleteEntity "{name: 'burger'}"
 - `schedule_manager_node.py`: 실제 맵 좌표로 `schedule.json` 갱신, Nav2 goal 순차 전송 통합 테스트 성공 (`SUCCEEDED`)
 - `risk_detector_node` + `schedule_manager_node` 동시 실행 검증 (서로 충돌 없이 독립 동작)
 - `nav2_action_client_test.py`: rclpy 순수 ActionClient로 goal 전송/취소(`cancel_goal_async`) 패턴 확인
+- **Day6**: 위험 감지 시 동적 재조정 완성 — `/risk_events` 수신 → 현재 Nav2 goal 취소 → 위험좌표로 이동(map 절대좌표 변환 포함) → 확인 후 원래 순찰 경로로 복귀까지 end-to-end 검증 완료
 
 ### 알려진 한계 (Day 6에서 처리 예정)
-- 위험 감지 시 goal 취소/재전송(동적 재조정) 미구현 — **Day6 핵심 작업**
 - `/risk_events`의 `zone_id`가 항상 `null` — 현재 순찰 중인 구역 정보와 연동 필요
 - 위험 이벤트가 로봇 기준 상대좌표(`distance`, `angle_rad`)만 제공 — Nav2 goal 전송을 위해 map 좌표계 절대 x/y로 변환하는 로직 필요 (로봇 현재 위치, `/amcl_pose` 또는 tf `map`→`base_link` 활용)
 - 야간(`night`) 블록처럼 자정을 넘는 시간대(`18:00~08:00`) 매칭 로직 미구현
 - `schedule_manager_node`는 현재 한 바퀴만 순회(`run_once`) — 무한 반복 순찰 로직 없음
 - `config/schedule.json`이 `setup.py`의 `data_files`에 미등록 — symlink 없는 일반 빌드 시 파일 못 찾을 수 있음
 - `operation` 블록 `end_time`이 테스트용으로 임시 확장된 상태 — 실제 운영 시간대로 재조정 필요
+- (해결됨, 기록용) `_get_robot_pose()`에서 `self.get_clock().now()`로 tf 조회 시 "extrapolation into the future" 에러 발생 → `rclpy.time.Time()`으로 변경해 최신 tf를 쓰도록 수정하여 해결. 콜백이 안 불리는 것처럼 보였던 원인은 실제로는 AMCL/localization 준비 안 된 상태였음 (Nav2 launch 시 AMCL 활성화 여부 꼭 확인)
 
 ### 다음 계획
-- **Day 6**: 위험 이벤트 좌표 변환(상대→절대) 설계, `schedule_manager_node`에 `cancel_goal_async` 통합, 위험 감지 시 재전송 후 원래 스케줄 복귀 로직
+- **Day 7~9**: 역할 교대 — 은경은 파트1(로봇/시뮬레이션), 센아는 파트2(백엔드/로직) 담당
 - **Day 10 / Day 14**: 다음 필수 통합 체크포인트, Day 14는 실제 발표 PC에서 리허설
 
 ---
