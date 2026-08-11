@@ -12,6 +12,9 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
+from .discord_notifier import send_discord_alert
+import time
+from .discord_notifier import send_discord_alert
 
 from patrol_robot.risk_logic import detect_risk
 
@@ -32,6 +35,8 @@ class RiskDetectorNode(Node):
         self.get_logger().info(
             f"위험감지 노드 시작 (threshold={self.threshold}m). /scan 구독 중..."
         )
+        
+        self._last_alert_time = 0.0
 
     def _scan_callback(self, msg: LaserScan):
         event = detect_risk(
@@ -55,6 +60,11 @@ class RiskDetectorNode(Node):
             f"위험 감지! 거리={event.distance:.2f}m, 각도={event.angle_rad:.2f}rad",
             throttle_duration_sec=1.0,
         )
+        
+        now = time.time()
+        if now - self._last_alert_time >= 1.0:
+            send_discord_alert(f"🚨 위험 감지! 거리={event.distance:.2f}m, 각도={event.angle_rad:.2f}rad")
+            self._last_alert_time = now
 
 
 def main(args=None):
