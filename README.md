@@ -1,127 +1,190 @@
-# 산업안전 순찰 로봇 프로젝트
+# 산업안전 순찰 로봇 (Schedule-based Industrial Safety Patrol Robot)
 
-스케줄 기반으로 순찰하다가 위험을 감지하면 우선순위를 재조정하고, 다시 원래 스케줄로 복귀하는 산업안전 순찰 로봇 (2인 팀, 3주 일정).
+작업장의 시간대별 위험도 변화에 맞춰, 로봇이 순찰 우선순위를 스스로 재조정하며 안전을 감시하는 시스템
 
-- 은경: 파트 1(로봇/시뮬레이션) Day 1~3 → 파트 2(백엔드/로직) Day 4~6
-- 센아: 파트 2(백엔드/로직) Day 1~3 → 파트 1(로봇/시뮬레이션) Day 4~6
-- 3일마다 파트 교대, Day 5·10·14는 필수 통합 체크포인트
-
----
-
-## 1. 프로젝트 구조
-
-```
-safety-patrol-robot/
-├── docs/
-│   ├── 파트1_인수인계_Day1-3.md
-│   ├── 파트2_인수인계_Day1-3.md
-│   ├── 파트1_진행상황_Day4-5.md
-│   └── 파트2_진행상황_Day4-5.md
-├── maps/
-│   ├── my_map.yaml
-│   └── my_map.pgm
-└── src/patrol_robot/               # ROS2 ament_python 패키지
-    ├── package.xml, setup.py, setup.cfg
-    ├── config/schedule.json
-    ├── resource/patrol_robot
-    ├── test/
-    └── patrol_robot/
-        ├── __init__.py
-        ├── risk_logic.py                  # 위험감지 순수 로직 (ROS2 비의존)
-        ├── risk_detector_node.py          # /scan 구독 → /risk_events 퍼블리시
-        ├── schedule_manager_node.py       # schedule.json 기반 Nav2 goal 순차 전송
-        └── nav2_action_client_test.py     # goal 취소(cancel_goal_async) 방식 확인용 예제
-```
+- 저장소: https://github.com/k-eungyeong/safety-patrol-robot
+- 팀: 은경([@k-eungyeong](https://github.com/k-eungyeong)), 세은([@se-ny](https://github.com/se-ny))
+- 기간: 2026.7.23 ~ 2026.8.12 (3주, 2인 팀 프로젝트)
 
 ---
 
-## 2. 환경 설정 (WSL Ubuntu-22.04 기준)
+## 핵심 기능
 
-새 터미널을 열 때마다 아래 3줄을 먼저 입력합니다.
+| 구분 | 내용 |
+|---|---|
+| 스케줄 순찰 | 시간대별(출근/가동/점심/야간) 구역별 순찰 웨이포인트를 JSON으로 정의, 순서대로 자동 순찰 |
+| 위험 감지 | LiDAR(`/scan`) 거리 임계값 기반 이상치 감지 (룰 기반) |
+| 동적 재조정 | 위험 감지 시 진행 중인 goal 취소 → 제자리 대기 → 상황 종료 후 중단 지점부터 순찰 재개 |
+| 실시간 알림 | 위험 이벤트 발생 시 Discord 웹훅으로 알림 전송 (쿨다운 적용) |
+| 실시간 대시보드 | FastAPI + Streamlit으로 순찰 상태·로봇 위치·위험 이벤트 로그 실시간 표시 |
+
+---
+
+## 기술 스택
+
+- **시뮬레이션**: ROS2 Humble + Gazebo, Ubuntu 22.04 (WSL2)
+- **로봇/내비게이션**: TurtleBot3 (waffle) + Nav2
+- **위험 감지**: LiDAR(`/scan`) 임계값 룰 기반
+- **백엔드**: FastAPI (ROS2 상태 ↔ REST API)
+- **알림**: Discord Webhook
+- **대시보드**: Streamlit
+
+---
+
+## 아키텍처
+┌─────────────────────────┐
+│    Gazebo + Nav2        │
+│ (시뮬레이션/내비게이션) │
+└────────────┬────────────┘
+             │ /scan, /amcl_pose, Nav2 action
+             ▼
+ ┌──────────────────────────────────────┐
+ │        schedule_manager_node          │
+ │  - schedule.json 기반 시간대별 순찰 순서 결정 │
+ │  - 위험 이벤트 수신 시 goal 취소→대기→재개    │
+ │  - /patrol_status 발행 (idle/patrolling/  │
+ │    risk_response)                     │
+ └───────────┬───────────────┬──────────┘
+             │               ▲
+ /risk_events│               │goal cancel/resend
+             │               │
+ ┌───────────▼───────────────┴──────────┐
+ │           risk_detector_node          │
+ │  - /scan 구독 → 거리 임계값(0.3m) 비교   │
+ │  - 이벤트 쿨다운(2s) 후 /risk_events 발행 │
+ │  - Discord 웹훅 알림 전송(5s 쿨다운)      │
+ └────────────────────────────────────────┘
+
+ /patrol_status, /risk_events
+             │
+             ▼
+ ┌───────────────────────┐       ┌────────────────────┐
+ │   api_server.py         │──────▶│  dashboard_app.py    │
+ │ (FastAPI, ROS2 구독 +   │  REST │ (Streamlit, 2초마다   │
+ │  REST API, :8000)        │       │  자동 새로고침, :8501) │
+ └───────────────────────┘       └────────────────────┘
+---
+
+## 파일 구성
+
+| 파일 | 역할 |
+|---|---|
+| `src/patrol_robot/patrol_robot/schedule_manager_node.py` | 순찰 스케줄링 + 위험 대응 상태머신 (비동기 goal 체인) |
+| `src/patrol_robot/patrol_robot/risk_detector_node.py` | LiDAR 기반 위험 감지, 이벤트/알림 쿨다운 |
+| `src/patrol_robot/patrol_robot/discord_notifier.py` | Discord 웹훅 알림 전송 |
+| `src/patrol_robot/config/schedule.json` | 시간대별(commute/operation/lunch/night) 순찰 스케줄 정의 |
+| `src/patrol_robot/config/nav2_params.yaml` | Nav2 파라미터 (`use_sim_time`, goal tolerance 등) |
+| `maps/my_map.yaml`, `maps/my_map.pgm` | 시뮬레이션 맵 |
+| `api_server.py` | FastAPI 서버 — ROS2 상태 구독 후 REST API로 노출 |
+| `dashboard_app.py` | Streamlit 대시보드 — 순찰 상태·위치·이벤트 로그 시각화 |
+
+---
+
+## 환경 세팅
+
+### 1. 사전 요구사항
+- ROS2 Humble, Gazebo, TurtleBot3, Nav2 (학원 PC 기설치)
+- Python 3.10
+
+### 2. 패키지 설치
+```bash
+pip install python-dotenv requests fastapi uvicorn streamlit pandas
+# ROS2 tf_transformations가 numpy 2.x와 호환되지 않으므로 반드시 다운그레이드
+pip install "numpy<1.24" --user
+```
+
+### 3. 환경변수
+프로젝트 루트에 `.env` 파일 생성:
+
+​```
+DISCORD_WEBHOOK_URL=<Discord 채널 웹훅 URL>
+​```
+
+### 4. 빌드
+```bash
+cd ~/safety-patrol-robot
+colcon build --packages-select patrol_robot
+source install/setup.bash
+```
+⚠️ `schedule_manager_node.py` 등 노드 코드를 수정한 경우, 위 빌드+source를 다시 해야 변경사항이 반영됩니다 (노드는 `install/` 하위 복사본에서 실행됨).
+
+---
+
+## 실행 방법
+
+아래 순서대로 각각 별도 터미널에서 실행합니다.
 
 ```bash
-source /opt/ros/humble/setup.bash
-export TURTLEBOT3_MODEL=burger
-export LIBGL_ALWAYS_SOFTWARE=1
+# 터미널 1 — Gazebo
+cd ~/safety-patrol-robot && source install/setup.bash
+export TURTLEBOT3_MODEL=waffle
+ros2 launch turtlebot3_gazebo turtlebot3_world.launch.py
+
+# 터미널 2 — Localization (AMCL)
+cd ~/safety-patrol-robot && source install/setup.bash
+ros2 launch nav2_bringup localization_launch.py \
+  map:=/home/dmin/safety-patrol-robot/maps/my_map.yaml \
+  use_sim_time:=True
+
+# 터미널 3 — Nav2
+cd ~/safety-patrol-robot && source install/setup.bash
+ros2 launch nav2_bringup navigation_launch.py use_sim_time:=True
+
+# 터미널 4 — RViz2 (반드시 이 launch로 열 것 — QoS 관련, 아래 알려진 이슈 참고)
+cd ~/safety-patrol-robot && source install/setup.bash
+ros2 launch nav2_bringup rviz_launch.py use_sim_time:=True
+
+# 터미널 5 — schedule_manager_node
+cd ~/safety-patrol-robot && source install/setup.bash
+ros2 run patrol_robot schedule_manager_node
+
+# 터미널 6 — risk_detector_node
+cd ~/safety-patrol-robot && source install/setup.bash
+ros2 run patrol_robot risk_detector_node
+
+# 터미널 7 — FastAPI 서버
+cd ~/safety-patrol-robot && source install/setup.bash
+python3 api_server.py
+
+# 터미널 8 — Streamlit 대시보드
+cd ~/safety-patrol-robot
+streamlit run dashboard_app.py
+# → http://localhost:8501 접속
 ```
 
-> **주의**: `LIBGL_ALWAYS_SOFTWARE=1`은 컴퓨터마다 다르게 작동할 수 있습니다. 은경 환경(WSL2)에서는 필수였지만, 센아 환경(같은 WSL2, 다른 PC)에서는 오히려 `gzserver`가 세그폴트(exit code -11)로 죽는 원인이었습니다. 문제가 생기면 껐다 켜보며 본인 환경에 맞는 쪽으로 판단하세요.
+RViz가 뜨면 **"2D Pose Estimate"** 로 Gazebo 상 로봇의 실제 위치에 초기 pose를 지정해야 AMCL이 정상 작동합니다.
+
+⚠️ **로봇 스폰 위치 주의**: 기본 스폰 좌표가 필러 구조물에 가까워 위험 감지 임계값(0.3m) 안쪽일 수 있습니다. 이 상태로 바로 순찰을 시작하면 goal 전송 직후 위험 감지→취소→재시도가 반복될 수 있으니, 필요시 `teleop_keyboard`로 로봇을 살짝 이동시킨 뒤 `schedule_manager_node`를 실행하세요.
+```bash
+export TURTLEBOT3_MODEL=waffle
+ros2 run turtlebot3_teleop teleop_keyboard
+```
 
 ---
 
-## 3. 트러블슈팅 노트
+## 스케줄 설정 (schedule.json)
 
-| 문제 | 원인 | 해결 |
+| 시간대(block_id) | 시간 | 순찰 순서 |
 |---|---|---|
-| `turtlebot3_gazebo` 패키지를 찾을 수 없음 | 패키지 미설치 | `sudo apt install -y ros-humble-turtlebot3 ros-humble-turtlebot3-simulations ros-humble-turtlebot3-msgs` |
-| 설치 중 `gz-tools2` 의존성 충돌 | 신형 Gazebo(Harmonic)와 구형 gazebo11(ROS2 Humble용) 공존 불가 | `gz-*`, `libgz-*`, `libignition-*` 계열 패키지 정리 후 `ros-humble-desktop`, `nav2`, `rviz2`, `slam_toolbox`, `turtlebot3` 관련 패키지를 한 번에 재설치 |
-| `spawn_entity` 서비스 타임아웃 | WSL 소프트웨어 렌더링 지연 / `GAZEBO_PLUGIN_PATH`에 ROS2 플러그인 경로 누락 | 아래 "수동 스폰" 명령 실행. 반복되면 `.bashrc`에 `export GAZEBO_PLUGIN_PATH=/opt/ros/humble/lib:$GAZEBO_PLUGIN_PATH` 추가 |
-| Gazebo/GUI 프로그램이 아예 안 뜨거나 멈춤 | WSLg(GUI 출력 시스템) 자체 오류 | Windows PowerShell에서 `wsl --shutdown` → `wsl --update` → WSL 재시작 |
-| 로봇이 회전 중 넘어짐 | 회전 명령 과다 누적 + 물리 연산 지연 | 아래 "로봇 삭제 후 재스폰" 명령 실행 |
-| RViz Nav2 패널 로딩 실패 (`diagnostic_updater` undefined symbol) | 패키지 재설치 과정에서 버전 꼬임 | `dpkg -l \| grep diagnostic`으로 버전 확인 후 재설치 시도 — 미해결, 확인 필요 |
-| Git 커밋 시 `Author identity unknown` | git 사용자 정보 미설정 | `git config --global user.email "..."`, `git config --global user.name "..."` |
-| Git push 인증 실패 | 비밀번호 인증 미지원 (GitHub 정책) | Personal Access Token(classic, `repo` scope) 발급 후 `git remote set-url origin https://<토큰>@github.com/k-eungyeong/safety-patrol-robot.git` |
+| commute | 08:00–09:00 | zone_a → zone_b |
+| operation | 09:00–16:00 | zone_a → zone_a → zone_b |
+| lunch | 12:00–13:00 | zone_b |
+| night | 18:00–08:00 (자정 넘김) | zone_a → zone_b |
 
-### 수동 스폰
-```bash
-ros2 run gazebo_ros spawn_entity.py -entity burger -file /opt/ros/humble/share/turtlebot3_gazebo/models/turtlebot3_burger/model.sdf -x 0.0 -y 0.0 -z 0.01
-```
+웨이포인트: `a_1=(0.55, 0.55)`, `a_2=(0.55, -0.55)`, `b_1=(-0.55, -0.55)` — 맵 중앙 필러 구조물로부터 균등 거리(0.78m)를 확보한 좌표입니다.
 
-### 로봇 삭제 후 재스폰 (넘어졌을 때)
-```bash
-ros2 service call /delete_entity gazebo_msgs/srv/DeleteEntity "{name: 'burger'}"
-```
-
-### 3-1. 팀원(센아) 환경에서 추가로 겪은 이슈 (같은 WSL2, 다른 PC)
-
-| 문제 | 원인 | 해결 |
-|---|---|---|
-| `bt_navigator` 활성화 실패 (`Node not recognized: SmoothPath`) | `turtlebot3_navigation2`의 `burger.yaml` plugin 목록이 구버전이라 `nav2_smooth_path_action_bt_node` 누락 | `sudo sed -i '/nav2_wait_action_bt_node/a\    - nav2_smooth_path_action_bt_node' /opt/ros/humble/share/turtlebot3_navigation2/param/humble/burger.yaml` |
-| `bt_navigator` 활성화 실패 (`RateController` 포트 이름 불일치) | BT XML은 `rate=`를 쓰는데 실제 설치된 `RateController`는 `hz`로 이름 변경됨 | `sudo sed -i 's/RateController rate=/RateController hz=/' /opt/ros/humble/share/nav2_bt_navigator/behavior_trees/*.xml` |
-| `controller_server` Configuring 단계 실패 (원인 불명) | 버전 정합성 문제로 추정 | `sudo apt install --reinstall ros-humble-navigation2 ros-humble-nav2-bringup -y` |
+> 참고: 16:00~18:00 구간은 로봇 순찰 스케줄에 정의되어 있지 않습니다 — 이 시간대는 사람이 직접 순찰하는 것으로 설계되어 있어 의도된 공백입니다.
 
 ---
 
-## 4. 진행 상황
+## 알려진 이슈 (미해결)
 
-### 완료 (Day 1~6)
-- ROS2 Humble + Gazebo + TurtleBot3 환경 구축, teleop 조작 확인
-- SLAM(Cartographer)으로 맵 생성 및 저장 (`maps/my_map.yaml`, `.pgm`)
-- Nav2 + 저장된 맵으로 2D Pose Estimate → 2D Nav Goal 자율 이동 확인
-- `risk_logic.py`: 위험감지 순수 로직 + 단위 테스트
-- `risk_detector_node.py`: `/scan` 구독 → `/risk_events` 퍼블리시까지 파이프라인 완성 및 검증
-- `schedule_manager_node.py`: 실제 맵 좌표로 `schedule.json` 갱신, Nav2 goal 순차 전송 통합 테스트 성공 (`SUCCEEDED`)
-- `risk_detector_node` + `schedule_manager_node` 동시 실행 검증 (서로 충돌 없이 독립 동작)
-- `nav2_action_client_test.py`: rclpy 순수 ActionClient로 goal 전송/취소(`cancel_goal_async`) 패턴 확인
-- **Day6**: 위험 감지 시 동적 재조정 완성 — `/risk_events` 수신 → 현재 Nav2 goal 취소 → 위험좌표로 이동(map 절대좌표 변환 포함) → 확인 후 원래 순찰 경로로 복귀까지 end-to-end 검증 완료
-
-### 알려진 한계 (Day 6에서 처리 예정)
-- `/risk_events`의 `zone_id`가 항상 `null` — 현재 순찰 중인 구역 정보와 연동 필요
-- 위험 이벤트가 로봇 기준 상대좌표(`distance`, `angle_rad`)만 제공 — Nav2 goal 전송을 위해 map 좌표계 절대 x/y로 변환하는 로직 필요 (로봇 현재 위치, `/amcl_pose` 또는 tf `map`→`base_link` 활용)
-- 야간(`night`) 블록처럼 자정을 넘는 시간대(`18:00~08:00`) 매칭 로직 미구현
-- `schedule_manager_node`는 현재 한 바퀴만 순회(`run_once`) — 무한 반복 순찰 로직 없음
-- `config/schedule.json`이 `setup.py`의 `data_files`에 미등록 — symlink 없는 일반 빌드 시 파일 못 찾을 수 있음
-- `operation` 블록 `end_time`이 테스트용으로 임시 확장된 상태 — 실제 운영 시간대로 재조정 필요
-- (해결됨, 기록용) `_get_robot_pose()`에서 `self.get_clock().now()`로 tf 조회 시 "extrapolation into the future" 에러 발생 → `rclpy.time.Time()`으로 변경해 최신 tf를 쓰도록 수정하여 해결. 콜백이 안 불리는 것처럼 보였던 원인은 실제로는 AMCL/localization 준비 안 된 상태였음 (Nav2 launch 시 AMCL 활성화 여부 꼭 확인)
-
-### 다음 계획
-- **Day 7~9**: 역할 교대 — 은경은 파트1(로봇/시뮬레이션), 센아는 파트2(백엔드/로직) 담당
-- **Day 10 / Day 14**: 다음 필수 통합 체크포인트, Day 14는 실제 발표 PC에서 리허설
+- **로봇 스폰 위치**: 기본 스폰 좌표가 위험 감지 임계값 안쪽이라 순찰 시작 전 수동 이동이 필요합니다. (위 "실행 방법" 참고)
+- **AMCL 로컬라이제이션 어긋남**: 장시간 구동 시 로컬 코스트맵이 전역 맵과 어긋나는(회전) 현상이 간헐적으로 발생합니다. 위험 대응 시 급격한 방향 전환이 잦아 스캔 매칭 시간이 부족한 것으로 추정되나 원인 미확정입니다. 발생 시 RViz의 "2D Pose Estimate"로 수동 재정렬하면 임시 해결됩니다.
+- **schedule_manager_node 종료 시 트레이스백**: 순찰 완료 후에도 위험 이벤트 감시를 위해 노드가 계속 실행되도록 설계되어 있어, Ctrl+C로 종료할 때 `rcl_shutdown already called` 관련 트레이스백이 출력될 수 있습니다. 기능상 문제는 없는 사소한 이슈입니다.
 
 ---
 
-## 5. Git 관련
+## 발표 환경
 
-- 저장소: `https://github.com/k-eungyeong/safety-patrol-robot` (본체, 센아의 `se-ny/patrol-robot`은 Day1~3 히스토리 백업용으로 유지)
-- 커밋 메시지 컨벤션: `Day숫자: 무엇을 했는지`
-- push 인증에 Personal Access Token 필요
-
----
-
-## 6. 참고 문서
-
-각 파트의 상세 작업 기록은 `docs/` 폴더 참고:
-- [파트1 인수인계 (Day1~3)](docs/파트1_인수인계_Day1-3.md)
-- [파트2 인수인계 (Day1~3)](docs/파트2_인수인계_Day1-3.md)
-- [파트1 진행상황 (Day4~5)](docs/파트1_진행상황_Day4-5.md)
-- [파트2 진행상황 (Day4~5)](docs/파트2_진행상황_Day4-5.md)
+발표는 학원 PC에서 진행하며 ROS2/Gazebo가 이미 설치되어 있어 별도 클라우드 배포는 필수가 아닙니다. 대신 환경 재현성 점검(패키지 버전 고정, 상대경로/`.env` 분리)과 발표 전 실제 학원 PC 리허설에 집중합니다.
