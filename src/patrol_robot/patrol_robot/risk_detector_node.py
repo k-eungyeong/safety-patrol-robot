@@ -24,7 +24,7 @@ class RiskDetectorNode(Node):
         super().__init__("risk_detector_node")
 
         # 위험 판단 임계값(m) - 파라미터로 빼서 나중에 실행 시 조정 가능하게
-        self.declare_parameter("threshold", 0.5)
+        self.declare_parameter("threshold", 0.3)
         self.threshold = self.get_parameter("threshold").value
 
         self.subscription = self.create_subscription(
@@ -37,6 +37,7 @@ class RiskDetectorNode(Node):
         )
         
         self._last_alert_time = 0.0
+        self._last_publish_time = 0.0
 
     def _scan_callback(self, msg: LaserScan):
         event = detect_risk(
@@ -50,6 +51,11 @@ class RiskDetectorNode(Node):
 
         if event is None:
             return
+        
+        now_check = time.time()
+        if now_check - self._last_publish_time < 2.0:
+            return
+        self._last_publish_time = now_check
 
         payload = json.dumps(event.to_dict(), ensure_ascii=False)
         out_msg = String()
@@ -62,7 +68,7 @@ class RiskDetectorNode(Node):
         )
         
         now = time.time()
-        if now - self._last_alert_time >= 1.0:
+        if now - self._last_alert_time >= 3.0:
             send_discord_alert(f"🚨 위험 감지! 거리={event.distance:.2f}m, 각도={event.angle_rad:.2f}rad")
             self._last_alert_time = now
 
