@@ -1,0 +1,26 @@
+# Safety Patrol Robot - Python 패키지 의존성 (Day11 정리)
+#
+# ROS2 Humble, Gazebo Classic, Nav2 자체는 시스템 설치(apt)가 필요하며
+# 이 파일로 관리되지 않음. 학원 PC 기준 이미 설치되어 있음을 전제로 함.
+#
+# 설치 방법:
+#   pip install -r requirements.txt
+#
+# numpy는 반드시 1.24 미만이어야 함 (ROS2 tf_transformations가 내부적으로
+# 쓰는 transforms3d 라이브러리가 numpy 2.x의 np.float, np.maximum_sctype
+# 등 제거된 API를 사용하고 있어 numpy>=1.24 설치 시 노드 실행이 깨짐).
+
+# Discord 웹훅 알림 (파트2 Day6)
+python-dotenv==1.2.2
+requests==2.34.2
+
+# 대시보드 API 서버 (파트1 Day9)
+fastapi==0.141.1
+uvicorn==0.52.1
+
+# 대시보드 프론트엔드 (파트1 Day9)
+streamlit==1.61.1
+pandas==2.3.3
+
+# numpy: 반드시 1.24 미만 고정 (위 설명 참고)
+numpy==1.23.5
