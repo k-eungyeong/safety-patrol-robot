@@ -14,7 +14,6 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 from .discord_notifier import send_discord_alert
 import time
-from .discord_notifier import send_discord_alert
 
 from patrol_robot.risk_logic import detect_risk
 

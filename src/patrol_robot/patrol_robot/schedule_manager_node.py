@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 """
-schedule_manager_node.py (Day6 업데이트)
+schedule_manager_node.py (Day8 업데이트)
 
-Day3 초안에서 추가된 것:
-- /risk_events 구독 → 위험 감지 시 현재 goal 취소하고 위험 좌표로 재전송
-- /amcl_pose 구독 → 위험 좌표(로봇 기준 상대좌표) 계산에 필요한 로봇 현재 위치 추적
+Day8에서 wall-hugging 문제 해결을 위해 아래 방식으로 전면 개편:
+- /risk_events 구독 → 위험 감지 시 현재 goal 취소 후 제자리 대기
+  (위험 지점으로 접근하지 않음 — Day6 방식의 반응형 접근은 폐기됨)
+- 비동기 goal 체인(_go_to_waypoint_async → _on_goal_response →
+  _on_goal_result)으로 전면 리팩토링, blocking spin 중첩으로 인한
+  데드락 제거
+- Nav2 goal 실패(status=6) 시 GOAL_RETRY_LIMIT(2회)까지 자동 재시도
 
 동작 방식:
-1. 평소엔 스케줄대로 순찰 (기존 run_once 로직)
+1. 평소엔 스케줄대로 순찰 (schedule.json 기반, 시간대별 patrol_order)
 2. /risk_events가 오면:
    a. 지금 가고 있던 goal을 취소
-   b. distance/angle_rad + 로봇 현재 pose로 위험 지점의 map 좌표 계산
-   c. 그 좌표로 새 goal 전송 (확인차 이동)
-   d. 도착하면 잠깐 대기 후 원래 순찰 스케줄로 복귀
+   b. RISK_INVESTIGATE_WAIT_SEC(3.0초) 동안 제자리 대기
+   c. 대기 종료 후 중단했던 지점(zone_id, waypoint_index)부터 순찰 재개
+3. goal 실패 시 GOAL_RETRY_WAIT_SEC(1.0초) 간격으로 GOAL_RETRY_LIMIT
+   (2회)까지 재시도, 모두 실패하면 다음 지점으로 넘어감
 """
 
 import json
-import math
-import time
 from datetime import datetime
 from pathlib import Path
 
