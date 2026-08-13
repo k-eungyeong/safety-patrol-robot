@@ -91,6 +91,18 @@ class ScheduleManagerNode(Node):
         # --- 위험 이벤트 구독 ---
         self.create_subscription(String, "/risk_events", self._risk_event_callback, 10)
 
+        # --- Day9(대시보드) 이식: 순찰 상태 발행 ---
+        # 대시보드(api_server.py)가 구독해서 화면에 표시함.
+        # TRANSIENT_LOCAL로 발행해서 대시보드가 로봇보다 늦게 켜져도
+        # 마지막 상태를 즉시 받게 함.
+        status_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        self._status_publisher = self.create_publisher(String, "/patrol_status", status_qos)
+
         self.get_logger().info("Nav2 액션 서버 대기 중...")
         self._nav_client.wait_for_server()
         self.get_logger().info("Nav2 준비 완료. 스케줄 매니저 시작.")
@@ -149,6 +161,29 @@ class ScheduleManagerNode(Node):
             return []
         return zone["waypoints"]
 
+    def _publish_status(
+        self,
+        state: str,
+        block: dict | None = None,
+        zone_id: str | None = None,
+        waypoint_id: str | None = None,
+        extra: dict | None = None,
+    ):
+        """대시보드용 순찰 상태 발행. state 예: idle/patrolling/risk_response."""
+        payload = {
+            "state": state,
+            "block_id": block["block_id"] if block else None,
+            "block_name": block["block_name"] if block else None,
+            "zone_id": zone_id,
+            "waypoint_id": waypoint_id,
+            "timestamp": datetime.now().isoformat(),
+        }
+        if extra:
+            payload.update(extra)
+        msg = String()
+        msg.data = json.dumps(payload, ensure_ascii=False)
+        self._status_publisher.publish(msg)
+
     # ------------------------------------------------------------------
     # 위험 이벤트 처리 (Day6 핵심)
     # ------------------------------------------------------------------
@@ -191,6 +226,9 @@ class ScheduleManagerNode(Node):
                 self._active_wp_idx,
             )
         self._interrupted_by_risk = True
+        self._publish_status(
+            "risk_response", extra={"distance": distance, "angle_rad": angle_rad}
+        )
         self._cancel_current_goal_and_wait()
 
     def _cancel_current_goal_and_wait(self):
@@ -232,6 +270,7 @@ class ScheduleManagerNode(Node):
         if block is None:
             self.get_logger().warn("현재 시각에 해당하는 time_block이 없습니다.")
             self._patrol_progress = None
+            self._publish_status("idle")
             return
 
         patrol_order = block["patrol_order"]
@@ -268,7 +307,11 @@ class ScheduleManagerNode(Node):
             waypoints = self._zone_waypoints(zone_id)
 
             if self._active_wp_idx < len(waypoints):
-                self._go_to_waypoint_async(zone_id, waypoints[self._active_wp_idx])
+                waypoint = waypoints[self._active_wp_idx]
+                self._publish_status(
+                    "patrolling", block=block, zone_id=zone_id, waypoint_id=waypoint["waypoint_id"]
+                )
+                self._go_to_waypoint_async(zone_id, waypoint)
                 return
 
             self._active_zone_idx += 1
